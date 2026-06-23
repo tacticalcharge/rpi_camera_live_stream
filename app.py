@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import cv2
 import requests
-from flask import Flask, Response, render_template_string, send_from_directory
+from flask import Flask, Response, render_template_string, send_from_directory, jsonify
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -140,7 +140,7 @@ class Camera:
                     self._start_recording(frame.shape)
                 if self.writer is not None:
                     self.writer.write(frame)
-                self._notify("Motion detected on camera")
+                self._notify("Motion detected on camera \n http://192.168.68.113:5000")
             else:
                 if self.last_motion_state:
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] motion no longer detected")
@@ -197,6 +197,15 @@ INDEX_HTML = """
     .status { margin-top: 8px; font-size: 14px; color: #bbb; }
     .btn { background: #2d2d2d; color: #eee; border: 1px solid #444; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
     .btn:hover { background: #3a3a3a; }
+    .recordings { width: min(100%, 1100px); margin-top: 18px; }
+    .recordings h2 { margin: 0 0 8px; font-size: 18px; }
+    .recordings-list { display: flex; flex-direction: column; gap: 8px; }
+    .rec-btn { text-align: left; width: 100%; }
+    .rec-meta { font-size: 12px; color: #aaa; margin-left: 6px; }
+    .player { width: min(100%, 1100px); margin-top: 16px; display: none; }
+    .player video { width: 100%; max-height: 70vh; background: #000; border: 2px solid #333; border-radius: 6px; }
+    .player-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+    .player-title { font-size: 14px; color: #bbb; }
   </style>
 </head>
 <body>
@@ -209,6 +218,17 @@ INDEX_HTML = """
       <img class="frame" id="cam" src="/stream" />
     </div>
     <div class="status" id="status">Loading…</div>
+    <section class="player" id="player">
+      <div class="player-header">
+        <div class="player-title" id="player-title">Playing</div>
+        <button class="btn" id="player-close" type="button">Close</button>
+      </div>
+      <video id="player-video" controls></video>
+    </section>
+    <section class="recordings">
+      <h2>Recordings</h2>
+      <div id="recordings" class="recordings-list">Loading…</div>
+    </section>
   </main>
   <script>
     const cam = document.getElementById('cam');
@@ -232,6 +252,47 @@ INDEX_HTML = """
     }
     setInterval(refreshStatus, 2000);
     refreshStatus();
+
+    async function loadRecordings() {
+      const res = await fetch('/recordings-list');
+      const data = await res.json();
+      const list = document.getElementById('recordings');
+      const player = document.getElementById('player');
+      const playerVideo = document.getElementById('player-video');
+      const playerTitle = document.getElementById('player-title');
+      const playerClose = document.getElementById('player-close');
+
+      playerClose.addEventListener('click', () => {
+        playerVideo.pause();
+        playerVideo.removeAttribute('src');
+        playerVideo.load();
+        player.style.display = 'none';
+      });
+
+      if (!data.items.length) {
+        list.textContent = 'No recordings yet.';
+        return;
+      }
+      list.innerHTML = '';
+      for (const item of data.items) {
+        const btn = document.createElement('button');
+        btn.className = 'btn rec-btn';
+        btn.type = 'button';
+        btn.textContent = item.filename;
+        btn.addEventListener('click', () => {
+          playerTitle.textContent = item.filename;
+          playerVideo.src = `/recordings/${item.filename}`;
+          player.style.display = 'block';
+          playerVideo.play();
+        });
+        const meta = document.createElement('span');
+        meta.className = 'rec-meta';
+        meta.textContent = `(${item.size_kb} KB)`;
+        btn.appendChild(meta);
+        list.appendChild(btn);
+      }
+    }
+    loadRecordings();
   </script>
 </body>
 </html>
@@ -279,8 +340,29 @@ def recordings(filename):
     return send_from_directory(RECORDINGS_DIR, filename, as_attachment=False)
 
 
+@app.route("/recordings-list")
+def recordings_list():
+    items = []
+    try:
+        for name in os.listdir(RECORDINGS_DIR):
+            if not name.lower().endswith(RECORD_EXT.lower()):
+                continue
+            path = os.path.join(RECORDINGS_DIR, name)
+            if not os.path.isfile(path):
+                continue
+            stat = os.stat(path)
+            items.append({
+                "filename": name,
+                "mtime": stat.st_mtime,
+                "size_kb": int(stat.st_size / 1024),
+            })
+    except FileNotFoundError:
+        pass
+
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return jsonify({"items": items})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, threaded=True)
-
-
 
