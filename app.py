@@ -41,6 +41,7 @@ NTFY_ENABLED = _get_env("NTFY_ENABLED", lambda v: v.lower() == "true", True)
 NTFY_BASE_URL = _get_env("NTFY_BASE_URL", str, "https://ntfy.sh")
 NTFY_TOPIC = _get_env("NTFY_TOPIC", str, "Cat Surveilance")
 NTFY_TOKEN = _get_env("NTFY_TOKEN", str, "")
+SITE_URL = _get_env("SITE_URL", str, "http://192.168.68.113:5000")
 
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
@@ -61,6 +62,8 @@ class Camera:
         self.last_motion_time = None
         self.recording = False
         self.writer = None
+        self.recording_path = None
+        self.recording_filename = None
         self.last_notify_time = 0.0
         self.last_motion_state = False
 
@@ -69,20 +72,29 @@ class Camera:
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.thread.start()
 
-    def _notify(self, message):
+    def _notify(self, message, file_path=None, filename=None, ignore_cooldown=False):
         if not NTFY_ENABLED:
             return
-        now = time.time()
-        if now - self.last_notify_time < NOTIFY_COOLDOWN_SECONDS:
-            return
-        self.last_notify_time = now
+        if not ignore_cooldown:
+            now = time.time()
+            if now - self.last_notify_time < NOTIFY_COOLDOWN_SECONDS:
+                return
+            self.last_notify_time = now
         try:
             topic = quote(NTFY_TOPIC)
             url = f"{NTFY_BASE_URL.rstrip('/')}/{topic}"
             headers = {"Title": "Motion detected"}
+            if message:
+                headers["Message"] = message
             if NTFY_TOKEN:
                 headers["Authorization"] = f"Bearer {NTFY_TOKEN}"
-            requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=5)
+            if file_path:
+                if filename:
+                    headers["Filename"] = filename
+                with open(file_path, "rb") as handle:
+                    requests.post(url, data=handle, headers=headers, timeout=10)
+            else:
+                requests.post(url, data=(message or "").encode("utf-8"), headers=headers, timeout=5)
         except Exception:
             pass
 
@@ -94,14 +106,27 @@ class Camera:
         height, width = frame_shape[:2]
         self.writer = cv2.VideoWriter(path, fourcc, FPS, (width, height))
         self.recording = True
+        self.recording_path = path
+        self.recording_filename = filename
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] recording started: {path}")
 
-    def _stop_recording(self):
+    def _stop_recording(self, notify=False):
         if self.writer is not None:
             self.writer.release()
         self.writer = None
         self.recording = False
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] recording stopped")
+        if notify and self.recording_path:
+            link_message = f"Motion recorded. Live view: {SITE_URL}"
+            self._notify(link_message)
+            self._notify(
+                "Motion video attached.",
+                file_path=self.recording_path,
+                filename=self.recording_filename,
+                ignore_cooldown=True,
+            )
+        self.recording_path = None
+        self.recording_filename = None
 
     def _detect_motion(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -140,13 +165,12 @@ class Camera:
                     self._start_recording(frame.shape)
                 if self.writer is not None:
                     self.writer.write(frame)
-                self._notify("Motion detected on camera \n http://192.168.68.113:5000")
             else:
                 if self.last_motion_state:
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] motion no longer detected")
                 if self.recording and self.last_motion_time is not None:
                     if now - self.last_motion_time >= NO_MOTION_SECONDS:
-                        self._stop_recording()
+                        self._stop_recording(notify=True)
                 if self.recording and self.writer is not None:
                     self.writer.write(frame)
 
@@ -163,7 +187,7 @@ class Camera:
                 self.last_motion_state = motion
 
         self.cap.release()
-        self._stop_recording()
+        self._stop_recording(notify=True)
 
     def get_frame(self):
         with self.lock:
@@ -365,4 +389,3 @@ def recordings_list():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, threaded=True)
-

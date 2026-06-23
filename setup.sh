@@ -1,6 +1,6 @@
 set -e
 echo "Creating python Venv..."
-python3 -m venv venv
+python -m venv venv
 
 source venv/bin/activate
 
@@ -15,4 +15,4 @@ fi
 echo "Setup complete!"
 
 echo "Running App.py..."
-python3 app.py
+python app.py
